@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CipherChat · Cryptographic Observation</title><link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><div><p class="eyebrow">LOCAL DEMONSTRATION MODE</p><h1>Cipher<span>Chat</span></h1><p>Secure messaging · attack-aware observation</p></div><button id="reset" class="secondary">New session</button></header>
+  <main>
+    <section class="left">
+      <article class="card session"><div class="title-row"><h2>Session</h2><span class="pill secure" id="state">SECURE</span></div><div id="session-info"></div><p class="warning">Demonstration only: session-key values are visible locally. Private identity keys remain hidden.</p></article>
+      <article class="card communication"><h2>Communication</h2><div class="participants"><div>Alice <small>sender</small></div><b>⇢</b><div>Bob <small>receiver</small></div></div><div id="chat" class="chat"></div><form id="message-form"><textarea id="message" rows="3" placeholder="Type a message for Bob…">Hello Bob</textarea><button type="submit">Send securely</button></form></article>
+      <article class="card attacker"><h2>⚠ Controlled attacker</h2><p>Local simulator only — no network activity.</p><div class="controls"><button data-attack="replay">Replay message</button><button data-attack="tamper_ciphertext">Modify ciphertext</button><button data-attack="tamper_nonce">Modify nonce</button><button data-attack="tamper_sequence_number">Modify sequence</button><button data-attack="tamper_message_id">Modify message ID</button><button data-attack="tamper_session_id">Modify session ID</button><button data-attack="tamper_sender_id">Modify sender ID</button><button data-attack="key_substitution" class="danger">Substitute peer key</button></div></article>
+    </section>
+    <section class="right">
+      <article class="card pipeline"><div class="title-row"><h2>Cryptographic pipeline</h2><span>click a step below</span></div><div id="pipeline"></div></article>
+      <article class="card observation"><div class="title-row"><h2>Live protocol execution</h2><div class="steps"><button id="previous" class="secondary">Previous</button><button id="next" class="secondary">Next step</button><button id="play">Play</button></div></div><div id="step-info" class="step-info"></div><div id="timeline" class="timeline"></div></article>
+      <article class="card technical"><div class="title-row"><h2 id="technical-title">Technical data</h2><button id="why" class="secondary">Why?</button></div><pre id="technical-data">Select an event to inspect actual backend values.</pre><p id="explanation" hidden></p></article>
+    </section>
+  </main><script src="/app.js"></script>
+</body></html>
