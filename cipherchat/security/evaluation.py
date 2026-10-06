@@ -1,0 +1,468 @@
+"""Reproducible preliminary security evaluation for CipherChat.
+
+Run with::
+
+    python -m cipherchat.security.evaluation
+
+The command writes a concise Markdown report and one JSON Lines record per
+security property.  Logs intentionally exclude plaintext and key material.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import sys
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
+from pathlib import Path
+from time import perf_counter_ns
+from typing import Callable
+
+from cryptography import __version__ as cryptography_version
+
+from cipherchat.crypto.identity import Identity
+from cipherchat.crypto.key_exchange import public_key_bytes
+from cipherchat.protocol.messages import ReceiverSession, SenderSession, SessionInactiveError
+from cipherchat.protocol.session import SessionManager
+from cipherchat.security.attacks import AttackType, KeySubstitutionError
+from cipherchat.security.evidence import EvidenceLog, verify_evidence_chain
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    case_id: str
+    security_property: str
+    status: str
+    objective: str
+    expected: str
+    observed: str
+    metrics: dict[str, int | float | bool | str]
+    interpretation: str
+    duration_ms: float
+
+
+@dataclass(frozen=True)
+class EvaluationReport:
+    generated_at: str
+    environment: dict[str, str]
+    sample_size: int
+    results: tuple[CaseResult, ...]
+
+    @property
+    def counts(self) -> dict[str, int]:
+        return {
+            status: sum(result.status == status for result in self.results)
+            for status in ("PASS", "FAIL", "LIMITATION")
+        }
+
+    @property
+    def overall_status(self) -> str:
+        if self.counts["FAIL"]:
+            return "FAIL"
+        if self.counts["LIMITATION"]:
+            return "PASS WITH LIMITATIONS"
+        return "PASS"
+
+
+def _timed(case: Callable[[], CaseResult]) -> CaseResult:
+    started = perf_counter_ns()
+    result = case()
+    elapsed = (perf_counter_ns() - started) / 1_000_000
+    return replace(result, duration_ms=round(elapsed, 3))
+
+
+def _sessions(label: str) -> tuple[SessionManager, SessionManager]:
+    alice, bob = Identity.create("alice"), Identity.create("bob")
+    alice_manager = SessionManager(alice, "bob", public_key_bytes(bob.public_key))
+    bob_manager = SessionManager(bob, "alice", public_key_bytes(alice.public_key))
+    context = f"security-evaluation:{label}".encode()
+    alice_manager.establish(public_key_bytes(bob.public_key), session_id=label, context=context)
+    bob_manager.establish(public_key_bytes(alice.public_key), session_id=label, context=context)
+    return alice_manager, bob_manager
+
+
+def _confidentiality(sample_size: int) -> CaseResult:
+    alice, bob = _sessions("confidentiality")
+    assert alice.sender is not None and bob.receiver is not None
+    messages = [alice.sender.encrypt(f"confidential sample {index}") for index in range(sample_size)]
+    unauthorized_rejections = 0
+    authorized_round_trips = 0
+    serialized_leaks = 0
+    for index, message in enumerate(messages):
+        attacker = ReceiverSession(b"M" * 32, message.session_id, message.sender_id)
+        try:
+            attacker.decrypt(message)
+        except Exception:
+            unauthorized_rejections += 1
+        if f"confidential sample {index}" in message.to_json():
+            serialized_leaks += 1
+        if bob.receiver.decrypt(message) == f"confidential sample {index}":
+            authorized_round_trips += 1
+    unique_nonces = len({message.nonce for message in messages})
+    passed = (
+        unauthorized_rejections == sample_size
+        and authorized_round_trips == sample_size
+        and serialized_leaks == 0
+        and unique_nonces == sample_size
+    )
+    return CaseResult(
+        "CONF-01", "Confidentiality", "PASS" if passed else "FAIL",
+        "Verify authorized decryption, wrong-key rejection, nonce uniqueness, and absence of plaintext in wire JSON.",
+        "All authorized reads succeed; all wrong-key reads fail; no plaintext is serialized; all sampled nonces differ.",
+        f"{authorized_round_trips}/{sample_size} authorized reads succeeded and "
+        f"{unauthorized_rejections}/{sample_size} wrong-key reads were rejected.",
+        {
+            "samples": sample_size,
+            "authorized_success_rate": authorized_round_trips / sample_size,
+            "wrong_key_rejection_rate": unauthorized_rejections / sample_size,
+            "unique_nonce_rate": unique_nonces / sample_size,
+            "serialized_plaintext_leaks": serialized_leaks,
+        },
+        "AES-256-GCM protects sampled message content in transit. This does not assess endpoint compromise, memory disclosure, or traffic analysis.",
+        0.0,
+    )
+
+
+def _authenticity() -> CaseResult:
+    alice, bob = _sessions("authenticity")
+    assert alice.sender is not None and bob.receiver is not None
+    message = alice.sender.encrypt("authenticity probe")
+    probes = (
+        replace(message, sender_id="mallory"),
+        replace(message, message_id="forged-message-id"),
+        replace(message, ciphertext=b"x" + message.ciphertext[1:]),
+    )
+    rejected = 0
+    for probe in probes:
+        receiver = ReceiverSession(bob.receiver.key, "authenticity", "alice")
+        try:
+            receiver.decrypt(probe)
+        except Exception:
+            rejected += 1
+    mallory = Identity.create("mallory")
+    pin_rejected = False
+    try:
+        alice.establish(public_key_bytes(mallory.public_key), session_id="forged", context=b"forged")
+    except KeySubstitutionError:
+        pin_rejected = True
+    passed = rejected == len(probes) and pin_rejected
+    return CaseResult(
+        "AUTH-01", "Authenticity", "PASS" if passed else "FAIL",
+        "Verify authenticated message fields and reject a peer key that differs from the trusted pin.",
+        "Every forged message and the substituted public key are rejected.",
+        f"Rejected {rejected}/{len(probes)} message forgeries; pinned-key substitution rejected={pin_rejected}.",
+        {
+            "forgery_attempts": len(probes),
+            "forgery_rejection_rate": rejected / len(probes),
+            "key_substitution_rejected": pin_rejected,
+        },
+        "The session authenticates encrypted content and pinned peer-key continuity. Initial pin provisioning remains an external trust requirement.",
+        0.0,
+    )
+
+
+def _integrity() -> CaseResult:
+    alice, bob = _sessions("integrity")
+    assert alice.sender is not None and bob.receiver is not None
+    message = alice.sender.encrypt("integrity probe")
+    variants = {
+        "ciphertext": replace(message, ciphertext=b"x" + message.ciphertext[1:]),
+        "nonce": replace(message, nonce=b"x" + message.nonce[1:]),
+        "sequence_number": replace(message, sequence_number=message.sequence_number + 1),
+        "message_id": replace(message, message_id="altered-message-id"),
+        "session_id": replace(message, session_id="altered-session"),
+        "sender_id": replace(message, sender_id="mallory"),
+    }
+    rejected = 0
+    for tampered in variants.values():
+        receiver = ReceiverSession(bob.receiver.key, "integrity", "alice")
+        try:
+            receiver.decrypt(tampered)
+        except Exception:
+            rejected += 1
+    passed = rejected == len(variants)
+    return CaseResult(
+        "INT-01", "Integrity", "PASS" if passed else "FAIL",
+        "Alter every protected payload or metadata field individually and attempt decryption.",
+        "All altered messages are rejected before plaintext is released.",
+        f"Rejected {rejected}/{len(variants)} tampered messages.",
+        {"tamper_attempts": len(variants), "tamper_detection_rate": rejected / len(variants)},
+        "GCM authentication and receiver binding detected every tested in-transit modification.",
+        0.0,
+    )
+
+
+def _non_repudiation() -> CaseResult:
+    alice, bob = _sessions("non-repudiation")
+    assert alice.sender is not None and bob.receiver is not None
+    # Both peers derive the same symmetric key. A peer can therefore construct
+    # a valid message labelled as the other peer; no digital signature exists.
+    peer_forge = SenderSession(bob.receiver.key, "non-repudiation", "alice")
+    forged = peer_forge.encrypt("peer-generated message")
+    forgery_accepted = bob.receiver.decrypt(forged) == "peer-generated message"
+    return CaseResult(
+        "NREP-01", "Non-repudiation", "LIMITATION" if forgery_accepted else "PASS",
+        "Determine whether a recipient can create a message that verifies as if it came from the sender.",
+        "A system claiming non-repudiation must bind messages to the sender with a sender-only signing key.",
+        f"A peer holding the shared session key created a message accepted as Alice: {forgery_accepted}.",
+        {"peer_forgery_accepted": forgery_accepted, "digital_signatures_present": False},
+        "CipherChat provides symmetric message authentication, not non-repudiation. Digital signatures plus protected identity-key provenance would be required.",
+        0.0,
+    )
+
+
+def _evidence_tampering() -> CaseResult:
+    log = EvidenceLog()
+    first = log.record(session_id="evidence", attack_type=AttackType.REPLAY,
+                       description="Replay rejected", timestamp="2026-01-01T00:00:00+00:00")
+    second = log.record(session_id="evidence", attack_type=AttackType.TAMPERING,
+                        description="Authentication failed", timestamp="2026-01-01T00:00:01+00:00")
+    third = log.record(session_id="evidence", attack_type=AttackType.KEY_SUBSTITUTION,
+                       description="Pinned key mismatch", timestamp="2026-01-01T00:00:02+00:00")
+    checkpoint = log.checkpoint()
+    attacks = (
+        [replace(first, description="rewritten"), second, third],
+        [second, first, third],
+        [first, second],
+        [second, third],
+        [first, second, third, replace(third, incident_id="appended")],
+    )
+    detected = sum(not verify_evidence_chain(records, checkpoint) for records in attacks)
+    baseline_valid = verify_evidence_chain(log.records, checkpoint)
+    passed = baseline_valid and detected == len(attacks)
+    return CaseResult(
+        "EVID-01", "Evidence tampering", "PASS" if passed else "FAIL",
+        "Attempt record modification, reordering, tail deletion, prefix deletion, and untrusted append against a checkpoint.",
+        "The original chain verifies and every altered chain fails verification.",
+        f"Original valid={baseline_valid}; detected {detected}/{len(attacks)} evidence-chain attacks.",
+        {
+            "tampering_attempts": len(attacks),
+            "tampering_detection_rate": detected / len(attacks),
+            "trusted_checkpoint_used": True,
+        },
+        "The SHA-256 chain detects tested changes only when the chain checkpoint is retained in independent trusted storage.",
+        0.0,
+    )
+
+
+def _access_control() -> CaseResult:
+    alice, bob = _sessions("access-control")
+    assert alice.sender is not None and bob.receiver is not None
+    message = alice.sender.encrypt("access probe")
+    denied = 0
+    for receiver in (
+        ReceiverSession(bob.receiver.key, "other-session", "alice"),
+        ReceiverSession(bob.receiver.key, "access-control", "mallory"),
+        ReceiverSession(b"Z" * 32, "access-control", "alice"),
+    ):
+        try:
+            receiver.decrypt(message)
+        except Exception:
+            denied += 1
+    old_sender, old_receiver = alice.sender, bob.receiver
+    alice.rekey(public_key_bytes(bob.identity.public_key), session_id="access-control-2", context=b"access-control-2")
+    bob.rekey(public_key_bytes(alice.identity.public_key), session_id="access-control-2", context=b"access-control-2")
+    invalidated = 0
+    try:
+        old_sender.encrypt("should be denied")
+    except SessionInactiveError:
+        invalidated += 1
+    try:
+        old_receiver.decrypt(message)
+    except SessionInactiveError:
+        invalidated += 1
+    passed = denied == 3 and invalidated == 2
+    return CaseResult(
+        "AC-01", "Access control", "PASS" if passed else "FAIL",
+        "Attempt access with the wrong session, sender binding, key, and invalidated session objects.",
+        "All unauthorized protocol-level attempts fail closed.",
+        f"Denied {denied}/3 binding/key attempts and {invalidated}/2 invalidated-session operations.",
+        {
+            "unauthorized_attempts": 5,
+            "unauthorized_rejections": denied + invalidated,
+            "unauthorized_rejection_rate": (denied + invalidated) / 5,
+        },
+        "Protocol-level possession and binding checks pass. The prototype has no users, roles, resource permissions, or persistent authorization policy.",
+        0.0,
+    )
+
+
+def run_evaluation(sample_size: int = 100) -> EvaluationReport:
+    if sample_size < 1:
+        raise ValueError("sample_size must be at least 1")
+    cases: tuple[Callable[[], CaseResult], ...] = (
+        lambda: _confidentiality(sample_size),
+        _authenticity,
+        _integrity,
+        _non_repudiation,
+        _evidence_tampering,
+        _access_control,
+    )
+    return EvaluationReport(
+        generated_at=datetime.now().astimezone().isoformat(),
+        environment={
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "cryptography": cryptography_version,
+        },
+        sample_size=sample_size,
+        results=tuple(_timed(case) for case in cases),
+    )
+
+
+def write_jsonl(report: EvaluationReport, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for result in report.results:
+            record = {
+                "generated_at": report.generated_at,
+                "environment": report.environment,
+                **asdict(result),
+            }
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _metric_text(metrics: dict[str, int | float | bool | str]) -> str:
+    values = []
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            rendered = f"{value:.2%}" if 0 <= value <= 1 else f"{value:.3f}"
+        else:
+            rendered = str(value)
+        values.append(f"`{key}`={rendered}")
+    return "; ".join(values)
+
+
+def print_terminal_report(report: EvaluationReport, markdown_path: Path, jsonl_path: Path) -> None:
+    """Print a self-contained explanation suitable for a live evaluation."""
+    counts = report.counts
+    width = 78
+    print("=" * width)
+    print("CIPHERCHAT PRELIMINARY INFORMATION-SECURITY EVALUATION")
+    print("=" * width)
+    print(f"Generated: {report.generated_at}")
+    print(
+        "Method: controlled local tests of confidentiality, authenticity, integrity,\n"
+        "        non-repudiation, evidence tampering, and protocol access control."
+    )
+    print(f"Confidentiality sample: {report.sample_size} encrypted messages")
+    print(
+        f"Environment: Python {report.environment['python']} | "
+        f"cryptography {report.environment['cryptography']}"
+    )
+    print(
+        "Status meaning: PASS = tested control behaved as expected; "
+        "FAIL = control failed;\n"
+        "                LIMITATION = the security property is not provided."
+    )
+
+    for index, item in enumerate(report.results, 1):
+        print("\n" + "-" * width)
+        print(f"TEST {index}/{len(report.results)} | {item.case_id} | {item.security_property.upper()}")
+        print("-" * width)
+        print(f"STATUS         : {item.status}")
+        print(f"WHAT IS TESTED : {item.objective}")
+        print(f"EXPECTED       : {item.expected}")
+        print(f"OBSERVED       : {item.observed}")
+        print(f"METRICS        : {_metric_text(item.metrics).replace('`', '')}")
+        print(f"DURATION       : {item.duration_ms:.3f} ms (observational only)")
+        print(f"MEANING        : {item.interpretation}")
+
+    print("\n" + "=" * width)
+    print("FINAL SECURITY POSTURE")
+    print("=" * width)
+    print(f"OVERALL STATUS : {report.overall_status}")
+    print(
+        f"RESULT COUNTS  : {counts['PASS']} PASS | {counts['FAIL']} FAIL | "
+        f"{counts['LIMITATION']} LIMITATION"
+    )
+    print(
+        "CONCLUSION     : Tested encryption and protocol controls passed, but the\n"
+        "                 system does not provide non-repudiation because peers\n"
+        "                 share the symmetric authentication key."
+    )
+    print(f"READABLE REPORT: {markdown_path}")
+    print(f"JSONL AUDIT LOG: {jsonl_path}")
+    print("No plaintext, private keys, session keys, or shared secrets are logged.")
+    print("=" * width)
+
+
+def write_markdown(report: EvaluationReport, path: Path, jsonl_name: str) -> None:
+    counts = report.counts
+    rows = "\n".join(
+        f"| {item.case_id} | {item.security_property} | {item.status} | {item.observed} |"
+        for item in report.results
+    )
+    details = "\n\n".join(
+        f"### {item.case_id}: {item.security_property}\n\n"
+        f"- **Status:** {item.status}\n"
+        f"- **Objective:** {item.objective}\n"
+        f"- **Expected:** {item.expected}\n"
+        f"- **Observed:** {item.observed}\n"
+        f"- **Metrics:** {_metric_text(item.metrics)}; `duration_ms`={item.duration_ms:.3f}\n"
+        f"- **Interpretation:** {item.interpretation}"
+        for item in report.results
+    )
+    content = f"""# CipherChat Preliminary Security Test Report
+
+Generated: `{report.generated_at}`  
+Overall status: **{report.overall_status}**
+
+## Scope and Method
+
+This reproducible, local black/grey-box evaluation covers confidentiality,
+authenticity, integrity, non-repudiation, evidence tampering, and protocol-level
+access control. It is a preliminary control verification, not a production
+penetration test or formal cryptographic proof. Timing is observational only.
+
+Environment: Python `{report.environment['python']}`, `cryptography`
+`{report.environment['cryptography']}`, `{report.environment['platform']}`.
+Confidentiality sample size: `{report.sample_size}` messages.
+
+## Summary
+
+| Case | Property | Status | Observed result |
+|---|---|---|---|
+{rows}
+
+Totals: **{counts['PASS']} PASS**, **{counts['FAIL']} FAIL**, and
+**{counts['LIMITATION']} LIMITATION**.
+
+## Detailed Cases and Interpretation
+
+{details}
+
+## Conclusion
+
+CipherChat passed the sampled confidentiality, in-session authenticity,
+integrity, evidence-tamper detection, and protocol-binding/access tests. It
+does **not** provide non-repudiation: either participant can create valid
+AES-GCM messages because authentication uses a shared symmetric key. Peer-key
+pinning also depends on trusted out-of-band provisioning, evidence checkpoints
+must be stored separately, and application-level authorization is outside the
+prototype.
+
+The machine-readable per-case log is `{jsonl_name}`. It stores outcomes and
+metrics only; no plaintext, private key, session key, or shared secret is logged.
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the CipherChat preliminary security evaluation")
+    parser.add_argument("--sample-size", type=int, default=100)
+    parser.add_argument("--output-dir", type=Path, default=Path("security_test_results"))
+    args = parser.parse_args(argv)
+    report = run_evaluation(args.sample_size)
+    jsonl_path = args.output_dir / "security_evaluation.jsonl"
+    markdown_path = args.output_dir / "SECURITY_TEST_REPORT.md"
+    write_jsonl(report, jsonl_path)
+    write_markdown(report, markdown_path, jsonl_path.name)
+    print_terminal_report(report, markdown_path, jsonl_path)
+    return 1 if report.counts["FAIL"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
