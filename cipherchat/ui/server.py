@@ -1,6 +1,7 @@
 """Local-only HTTP server exposing CipherChat execution traces for the demo UI."""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -13,8 +14,8 @@ from uuid import uuid4
 from cipherchat.crypto.identity import Identity
 from cipherchat.crypto.key_exchange import public_key_bytes
 from cipherchat.protocol.session import SessionManager
-from cipherchat.security.recovery import RecoveryState
-from cipherchat.security.simulator import AttackSimulator, TamperField
+from cipherchat.security.evidence import EvidenceLog, verify_evidence_chain
+from cipherchat.security.simulator import AttackSimulator
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -42,6 +43,8 @@ class DemonstrationController:
         self.bob_sessions: SessionManager | None = None
         self.session_id: str | None = None
         self.events: list[ObservationEvent] = []
+        self.deliveries: list[dict[str, object]] = []
+        self.evidence = EvidenceLog()
         self.establish()
 
     def establish(self) -> dict[str, object]:
@@ -49,6 +52,8 @@ class DemonstrationController:
         self.alice_sessions = SessionManager(self.alice, self.bob.identity_id, public_key_bytes(self.bob.public_key))
         self.bob_sessions = SessionManager(self.bob, self.alice.identity_id, public_key_bytes(self.alice.public_key))
         self.session_id = str(uuid4())
+        self.deliveries = []
+        self.evidence = EvidenceLog()
         context = b"cipherchat-ui-demo:" + self.session_id.encode()
         self.alice_sessions.establish(public_key_bytes(self.bob.public_key), session_id=self.session_id, context=context)
         self.bob_sessions.establish(public_key_bytes(self.alice.public_key), session_id=self.session_id, context=context)
@@ -70,6 +75,7 @@ class DemonstrationController:
 
     def snapshot(self) -> dict[str, object]:
         sender = self.alice_sessions.sender if self.alice_sessions else None
+        checkpoint = self.evidence.checkpoint()
         return {
             "demonstration_mode": True,
             "session": {
@@ -79,27 +85,49 @@ class DemonstrationController:
                 "bob_public_key": public_key_bytes(self.bob.public_key).hex() if self.bob else None,
                 "private_keys": "NOT DISPLAYED",
             },
+            "deliveries": self.deliveries,
+            "evidence": {
+                "records": [asdict(record) for record in self.evidence.records],
+                "checkpoint": asdict(checkpoint),
+                "chain_valid": verify_evidence_chain(self.evidence.records, checkpoint),
+            },
             "events": [asdict(event) for event in self.events],
         }
 
-    def send(self, plaintext: str) -> dict[str, object]:
+    def send(self, plaintext: str, sender_id: str = "alice") -> dict[str, object]:
         if not isinstance(plaintext, str) or not plaintext.strip():
             raise ValueError("message must not be empty")
+        if sender_id not in {"alice", "bob"}:
+            raise ValueError("sender must be alice or bob")
         assert self.alice_sessions and self.bob_sessions
-        sender, receiver = self.alice_sessions.sender, self.bob_sessions.receiver
+        if sender_id == "alice":
+            sender, receiver = self.alice_sessions.sender, self.bob_sessions.receiver
+            recipient_id = "bob"
+        else:
+            sender, receiver = self.bob_sessions.sender, self.alice_sessions.receiver
+            recipient_id = "alice"
         assert sender and receiver
         message = sender.encrypt(plaintext)
         aad = message.aad()
         accepted = receiver.decrypt(message)
+        envelope_sha256 = hashlib.sha256(message.to_json().encode("utf-8")).hexdigest()
+        self.deliveries.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "sender": sender_id, "recipient": recipient_id, "plaintext": accepted,
+            "message_id": message.message_id, "sequence_number": message.sequence_number,
+            "session_id": message.session_id, "aad_sha256": hashlib.sha256(aad).hexdigest(),
+            "envelope_sha256": envelope_sha256, "wire_message": message.to_dict(),
+        })
+        sender_name, recipient_name = sender_id.title(), recipient_id.title()
         self.events.extend([
-            _event("MESSAGE", "04", "MESSAGE CREATED", {"sender": "Alice", "recipient": "Bob", "plaintext": plaintext, "message_id": message.message_id, "sequence_number": message.sequence_number}, "A random UUID and monotonically increasing sequence identify this message."),
+            _event("MESSAGE", "04", "MESSAGE CREATED", {"sender": sender_name, "recipient": recipient_name, "plaintext": plaintext, "message_id": message.message_id, "sequence_number": message.sequence_number}, "A random UUID and monotonically increasing sequence identify this message."),
             _event("AAD", "05", "CANONICAL AAD CONSTRUCTED", {"aad_json": json.loads(aad), "aad_utf8": aad.decode("utf-8")}, "AAD authenticates routing and replay metadata without encrypting it."),
             _event("ENCRYPTION", "06", "AES-256-GCM ENCRYPTION", {"algorithm": "AES-256-GCM", "nonce": message.nonce.hex(), "ciphertext": message.ciphertext[:-16].hex(), "authentication_tag": message.ciphertext[-16:].hex(), "ciphertext_and_tag": message.ciphertext.hex(), "session_key": sender.key.hex(), "label": "LOCAL DEMONSTRATION VALUES"}, "A fresh nonce and the session key protect the plaintext and authenticate the AAD."),
             _event("TRANSMISSION", "07", "MESSAGE TRANSMITTED", {"raw_protocol_message": message.to_dict(), "raw_json": message.to_json()}, "The serialized protocol message carries metadata, nonce, and ciphertext."),
-            _event("RECEPTION", "08", "BOB RECEIVED MESSAGE", {"session_id": message.session_id, "sender_id": message.sender_id}, "Bob passed the received object to the real protocol receiver."),
+            _event("RECEPTION", "08", f"{recipient_name.upper()} RECEIVED MESSAGE", {"session_id": message.session_id, "sender_id": message.sender_id}, f"{recipient_name} passed the received object to the real protocol receiver."),
             _event("VALIDATION", "09", "REPLAY AND SESSION VALIDATION", {"session_valid": True, "sender_valid": True, "message_id": message.message_id, "sequence_number": message.sequence_number, "replay_result": "NOT PREVIOUSLY ACCEPTED"}, "The receiver checks its session binding and replay caches before accepting the message."),
             _event("DECRYPTION", "10", "AES-GCM AUTHENTICATION AND DECRYPTION", {"authentication": "VALID", "plaintext_recovered": accepted}, "The GCM tag authenticated the ciphertext and AAD before plaintext was returned."),
-            _event("MESSAGE", "11", "MESSAGE ACCEPTED", {"message_id": message.message_id, "sequence_number": message.sequence_number}, "Bob accepted the authenticated, non-replayed message."),
+            _event("MESSAGE", "11", "MESSAGE ACCEPTED", {"message_id": message.message_id, "sequence_number": message.sequence_number}, f"{recipient_name} accepted the authenticated, non-replayed message."),
         ])
         return {**self.snapshot(), "message": message.to_dict(), "plaintext": accepted}
 
@@ -114,11 +142,21 @@ class DemonstrationController:
             result = simulator.simulate_tampering(field)  # actual controlled attack simulator
         else:
             raise ValueError("unsupported attack")
+        evidence_record = self.evidence.record(
+            session_id=result.session_id,
+            attack_type=result.classification,
+            description=f"Controlled UI test rejected {result.attack_type.value}: {result.detail}",
+            message_id=result.message_id,
+            sequence_number=result.sequence_number,
+        )
+        checkpoint = self.evidence.checkpoint()
         result_data = {
             "attack_type": result.attack_type.value, "classification": result.classification.value,
             "detected": result.detected, "session_id": result.session_id, "message_id": result.message_id,
             "sequence_number": result.sequence_number, "evidence_generated": result.evidence_generated,
-            "evidence_hash": result.evidence_hash, "checkpoint_valid": result.checkpoint_valid,
+            "evidence_hash": evidence_record.evidence_hash,
+            "simulator_evidence_hash": result.evidence_hash,
+            "checkpoint_valid": verify_evidence_chain(self.evidence.records, checkpoint),
             "recovery_state": result.recovery_state.value, "recovery_history": [state.value for state in result.recovery_history],
             "rekeyed": result.rekeyed, "old_session_invalidated": result.old_session_invalidated,
             "detail": result.detail,
@@ -126,7 +164,7 @@ class DemonstrationController:
         self.events.extend([
             _event("ATTACK", "12", "ATTACKER INTERCEPTED", {"attack": result.attack_type.value, "detail": result.detail, "message_id": result.message_id, "sequence_number": result.sequence_number}, "A controlled local attack scenario ran through the existing backend simulator."),
             _event("VALIDATION", "13", "SECURITY VIOLATION DETECTED", {"classification": result.classification.value, "detected": result.detected}, "The displayed classification is produced by the protocol's actual failure path."),
-            _event("EVIDENCE", "14", "INCIDENT EVIDENCE GENERATED", {"evidence_hash": result.evidence_hash, "checkpoint_valid": result.checkpoint_valid, "session_id": result.session_id, "message_id": result.message_id, "sequence_number": result.sequence_number}, "The simulator recorded a real hash-chained incident record and checked its trusted checkpoint."),
+            _event("EVIDENCE", "14", "INCIDENT EVIDENCE GENERATED", {"incident_id": evidence_record.incident_id, "evidence_hash": evidence_record.evidence_hash, "previous_evidence_hash": evidence_record.previous_evidence_hash, "checkpoint_valid": verify_evidence_chain(self.evidence.records, checkpoint), "session_id": result.session_id, "message_id": result.message_id, "sequence_number": result.sequence_number}, "The controller appended a real hash-chained incident record and verified the complete chain against its checkpoint."),
             _event("RECOVERY", "15", "RECOVERY STATE TRANSITIONS", {"history": [state.value for state in result.recovery_history], "current_state": result.recovery_state.value}, "The existing bounded recovery state machine determined the next state."),
             _event("REKEY", "16", "REKEY OR BLOCK RESULT", {"rekeyed": result.rekeyed, "old_session_invalidated": result.old_session_invalidated, "new_session_active": result.recovered, "state": result.recovery_state.value}, "Recoverable scenarios install a new session; key substitution remains blocked."),
         ])
@@ -151,7 +189,7 @@ class _Handler(SimpleHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
-            if parsed.path == "/api/send": response = self.controller.send(payload.get("message", ""))
+            if parsed.path == "/api/send": response = self.controller.send(payload.get("message", ""), payload.get("sender", "alice"))
             elif parsed.path == "/api/attack": response = self.controller.attack(payload.get("attack", ""))
             else: self.send_error(HTTPStatus.NOT_FOUND); return
             self._json(response)
