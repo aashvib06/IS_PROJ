@@ -34,3 +34,32 @@ def test_key_substitution_observation_shows_blocked_session():
     assert result["attack"]["classification"] == "KEY_SUBSTITUTION"
     assert result["attack"]["recovery_state"] == "BLOCKED"
     assert not result["attack"]["rekeyed"]
+
+
+def test_ui_snapshot_exposes_delivery_hashes_and_verified_evidence_chain():
+    controller = DemonstrationController()
+    delivered = controller.send("four-screen verification")
+    delivery = delivered["deliveries"][0]
+    assert delivery["plaintext"] == "four-screen verification"
+    assert len(delivery["aad_sha256"]) == 64
+    assert len(delivery["envelope_sha256"]) == 64
+
+    attacked = controller.attack("tamper_ciphertext")
+    assert attacked["evidence"]["chain_valid"] is True
+    assert attacked["evidence"]["checkpoint"]["record_count"] == 1
+    assert attacked["evidence"]["records"][0]["attack_type"] == "TAMPERING"
+    assert attacked["attack"]["evidence_hash"] == attacked["evidence"]["checkpoint"]["evidence_hash"]
+
+
+def test_alice_and_bob_can_both_send_simple_messages():
+    controller = DemonstrationController()
+    controller.send("Hello Bob", "alice")
+    result = controller.send("Hello Alice", "bob")
+
+    assert [(item["sender"], item["recipient"], item["plaintext"]) for item in result["deliveries"]] == [
+        ("alice", "bob", "Hello Bob"),
+        ("bob", "alice", "Hello Alice"),
+    ]
+    assert result["deliveries"][0]["sequence_number"] == 1
+    assert result["deliveries"][1]["sequence_number"] == 1
+    assert any(event["title"] == "ALICE RECEIVED MESSAGE" for event in result["events"])
