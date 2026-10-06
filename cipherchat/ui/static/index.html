@@ -1,21 +1,149 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CipherChat · Cryptographic Observation</title><link rel="stylesheet" href="/styles.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CipherChat encrypted messaging demonstration">
+  <title>CipherChat :: Alice</title>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header><div><p class="eyebrow">LOCAL DEMONSTRATION MODE</p><h1>Cipher<span>Chat</span></h1><p>Secure messaging · attack-aware observation</p></div><button id="reset" class="secondary">New session</button></header>
+  <header class="site-header">
+    <p class="dateline">LOCAL DEMO</p>
+    <h1>CIPHERCHAT</h1>
+    <nav aria-label="Demo screens">
+      <button type="button" data-screen="sender" aria-current="page">alice</button>
+      <button type="button" data-screen="receiver">bob</button>
+      <button type="button" data-screen="attacker">attacker</button>
+      <button type="button" data-screen="administrative">audit</button>
+      <span class="nav-spacer"></span>
+      <button type="button" id="reset">new session</button>
+    </nav>
+  </header>
+
   <main>
-    <section class="left">
-      <article class="card session"><div class="title-row"><h2>Session</h2><span class="pill secure" id="state">SECURE</span></div><div id="session-info"></div><p class="warning">Demonstration only: session-key values are visible locally. Private identity keys remain hidden.</p></article>
-      <article class="card communication"><h2>Communication</h2><div class="participants"><div>Alice <small>sender</small></div><b>⇢</b><div>Bob <small>receiver</small></div></div><div id="chat" class="chat"></div><form id="message-form"><textarea id="message" rows="3" placeholder="Type a message for Bob…">Hello Bob</textarea><button type="submit">Send securely</button></form></article>
-      <article class="card attacker"><h2>⚠ Controlled attacker</h2><p>Local simulator only — no network activity.</p><div class="controls"><button data-attack="replay">Replay message</button><button data-attack="tamper_ciphertext">Modify ciphertext</button><button data-attack="tamper_nonce">Modify nonce</button><button data-attack="tamper_sequence_number">Modify sequence</button><button data-attack="tamper_message_id">Modify message ID</button><button data-attack="tamper_session_id">Modify session ID</button><button data-attack="tamper_sender_id">Modify sender ID</button><button data-attack="key_substitution" class="danger">Substitute peer key</button></div></article>
+    <section class="screen" data-view="sender">
+      <header class="screen-heading">
+        <h2>ALICE</h2>
+        <p class="presence">connected to Bob // encrypted</p>
+      </header>
+
+      <section class="conversation" id="alice-conversation" aria-live="polite">
+        <p class="empty">No messages yet.</p>
+      </section>
+
+      <form class="composer" data-sender="alice">
+        <label class="visually-hidden" for="alice-message">Message Bob</label>
+        <div class="prompt-line">
+          <span aria-hidden="true">&gt;</span>
+          <textarea id="alice-message" rows="2" placeholder="message Bob" autocomplete="off" spellcheck="false"></textarea>
+          <span class="caret" aria-hidden="true"></span>
+        </div>
+        <button class="primary" type="submit">send</button>
+      </form>
+
+      <details class="details" id="alice-details">
+        <summary>[inspect last encryption]</summary>
+        <dl class="definition-grid" id="alice-technical"></dl>
+      </details>
     </section>
-    <section class="right">
-      <article class="card pipeline"><div class="title-row"><h2>Cryptographic pipeline</h2><span>click a step below</span></div><div id="pipeline"></div></article>
-      <article class="card observation"><div class="title-row"><h2>Live protocol execution</h2><div class="steps"><button id="previous" class="secondary">Previous</button><button id="next" class="secondary">Next step</button><button id="play">Play</button></div></div><div id="step-info" class="step-info"></div><div id="timeline" class="timeline"></div></article>
-      <article class="card technical"><div class="title-row"><h2 id="technical-title">Technical data</h2><button id="why" class="secondary">Why?</button></div><pre id="technical-data">Select an event to inspect actual backend values.</pre><p id="explanation" hidden></p></article>
+
+    <section class="screen" data-view="receiver" hidden>
+      <header class="screen-heading">
+        <h2>BOB</h2>
+        <p class="presence">connected to Alice // encrypted</p>
+      </header>
+
+      <section class="conversation" id="bob-conversation" aria-live="polite">
+        <p class="empty">No messages yet.</p>
+      </section>
+
+      <form class="composer" data-sender="bob">
+        <label class="visually-hidden" for="bob-message">Reply to Alice</label>
+        <div class="prompt-line">
+          <span aria-hidden="true">&gt;</span>
+          <textarea id="bob-message" rows="2" placeholder="reply to Alice" autocomplete="off" spellcheck="false"></textarea>
+          <span class="caret" aria-hidden="true"></span>
+        </div>
+        <button class="primary" type="submit">send</button>
+      </form>
+
+      <details class="details" id="bob-details">
+        <summary>[inspect last encryption]</summary>
+        <dl class="definition-grid" id="bob-technical"></dl>
+      </details>
     </section>
-  </main><script src="/app.js"></script>
-</body></html>
+
+    <section class="screen" data-view="attacker" hidden>
+      <header class="screen-heading">
+        <h2>ATTACKER</h2>
+        <p class="presence">controlled tests // no external network</p>
+      </header>
+
+      <section class="section-block">
+        <h3>CHOOSE ATTACK</h3>
+        <div class="command-list">
+          <button type="button" data-attack="replay">replay message</button>
+          <button type="button" data-attack="tamper_ciphertext">change ciphertext</button>
+          <button type="button" data-attack="tamper_sender_id">forge sender</button>
+          <button type="button" data-attack="key_substitution">replace peer key</button>
+        </div>
+      </section>
+
+      <section class="section-block">
+        <h3>RESULT</h3>
+        <p id="attack-empty" class="empty">Run an attack to see the system response.</p>
+        <dl class="definition-grid" id="attack-result" hidden></dl>
+      </section>
+    </section>
+
+    <section class="screen" data-view="administrative" hidden>
+      <header class="screen-heading">
+        <h2>AUDIT</h2>
+        <p class="presence" id="audit-summary">session active</p>
+      </header>
+
+      <div class="admin-panes">
+        <section class="pane">
+          <h3>EVENTS</h3>
+          <div class="command-prompt">
+            <span aria-hidden="true">&gt;</span>
+            <input id="event-query" type="search" placeholder="filter events" autocomplete="off" aria-label="Filter events">
+            <span class="caret" aria-hidden="true"></span>
+            <span class="shortcut">^K</span>
+          </div>
+          <div id="event-list" class="result-list" role="listbox" aria-label="Execution events"></div>
+        </section>
+
+        <section class="pane">
+          <h3>DETAIL</h3>
+          <p class="selected-event" id="event-title">Select an event.</p>
+          <pre id="event-data"></pre>
+          <p class="comment" id="event-explanation"></p>
+        </section>
+      </div>
+
+      <section class="section-block evidence-section">
+        <h3>EVIDENCE</h3>
+        <p id="evidence-state" class="presence">chain valid // 0 records</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>TYPE</th><th>TIME</th><th>INCIDENT</th><th>HASH</th></tr></thead>
+            <tbody id="evidence-table"></tbody>
+          </table>
+        </div>
+        <p id="evidence-empty" class="empty">No incidents recorded.</p>
+      </section>
+    </section>
+  </main>
+
+  <div id="system-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
+    <h2 id="modal-title">NOTICE</h2>
+    <p id="modal-message"></p>
+    <button type="button" id="modal-ok" class="primary">ok</button>
+    <p class="meta">esc closes</p>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
