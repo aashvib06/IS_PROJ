@@ -12,9 +12,16 @@ python -m venv .venv
 pip install -r requirements.txt
 pytest
 python -m cipherchat.main
+# Reproducible security-property evaluation and structured logs
+python -m cipherchat.security.evaluation
 # Local teaching UI (open http://127.0.0.1:8000)
 python -m cipherchat.ui.server
 ```
+
+The evaluation writes `security_test_results/SECURITY_TEST_REPORT.md` and a
+machine-readable `security_test_results/security_evaluation.jsonl` containing
+one interpreted result per tested security property. No plaintext or key
+material is included in that log.
 
 See [UI_OBSERVATION_GUIDE.md](UI_OBSERVATION_GUIDE.md) for the local
 cryptographic observation interface and its demonstration-mode boundaries.
