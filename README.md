@@ -28,18 +28,21 @@ cryptographic observation interface and its demonstration-mode boundaries.
 
 ## Design
 
-The cryptographic path is **X25519 ECDH → HKDF-SHA-256 → AES-256-GCM**. Each
-message has an unpredictable UUID, a strict monotonically increasing sequence
-number, a fresh random 96-bit GCM nonce, and canonical JSON AAD over the
-protocol version, session ID, sender ID, message ID, and sequence number.
+The cryptographic path is **X25519 ECDH → HKDF-SHA-256 → AES-256-GCM →
+Ed25519 signature**. Each identity owns separate key-agreement and signing key
+pairs. Each message has an unpredictable UUID, a strict monotonically
+increasing sequence number, a fresh random 96-bit GCM nonce, canonical JSON AAD
+over the protocol version, session ID, sender ID, message ID, and sequence
+number, and an Ed25519 signature over the complete canonical encrypted envelope.
 Receivers reject a sequence at or below the highest accepted sequence; this is
 a deliberately simple in-order policy. A production transport may use a
 bounded sliding window for out-of-order delivery.
 
-Public key material is deliberately unauthenticated in this phase. Basic ECDH
-without authenticated identity verification is vulnerable to active
-man-in-the-middle attacks. An authentication failure establishes only a
-cryptographic verification failure; it is not proof of a MITM attack.
+Both the peer's X25519 and Ed25519 public keys are pinned before session use.
+This prototype assumes those pins were provisioned through a trusted external
+channel; it does not provide a certificate authority or key-transparency
+system. A verification failure establishes only a cryptographic failure, not
+proof of a particular attacker.
 
 Evidence excludes plaintext, private keys, session keys, and raw shared
 secrets. SHA-256 chaining detects modifications and reordering relative to the

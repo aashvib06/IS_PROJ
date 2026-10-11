@@ -3,15 +3,18 @@ import base64
 import json
 from dataclasses import dataclass
 from uuid import uuid4
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cipherchat.crypto.encryption import Ciphertext, decrypt, encrypt
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 class ProtocolError(Exception): pass
 class ReplayError(ProtocolError): pass
 class ValidationError(ProtocolError): pass
 class SessionInactiveError(ProtocolError): pass
+class DigitalSignatureError(ProtocolError): pass
 
 
 def _b64(value: bytes) -> str:
@@ -34,6 +37,13 @@ class EncryptedMessage:
     sequence_number: int
     nonce: bytes
     ciphertext: bytes
+    signature: bytes
+
+    def _wire_fields(self) -> dict[str, object]:
+        return {"protocol_version": self.protocol_version, "session_id": self.session_id,
+                "sender_id": self.sender_id, "message_id": self.message_id,
+                "sequence_number": self.sequence_number, "nonce": _b64(self.nonce),
+                "ciphertext": _b64(self.ciphertext)}
 
     def aad(self) -> bytes:
         """Canonical UTF-8 JSON over authenticated clear-text metadata."""
@@ -43,10 +53,12 @@ class EncryptedMessage:
         return json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     def to_dict(self) -> dict[str, object]:
-        return {"protocol_version": self.protocol_version, "session_id": self.session_id,
-                "sender_id": self.sender_id, "message_id": self.message_id,
-                "sequence_number": self.sequence_number, "nonce": _b64(self.nonce),
-                "ciphertext": _b64(self.ciphertext)}
+        return {**self._wire_fields(), "signature": _b64(self.signature)}
+
+    def signing_bytes(self) -> bytes:
+        """Canonical, domain-separated bytes covered by the Ed25519 signature."""
+        canonical = json.dumps(self._wire_fields(), sort_keys=True, separators=(",", ":"))
+        return b"cipherchat:encrypted-message:v2\x00" + canonical.encode("utf-8")
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
@@ -57,11 +69,12 @@ class EncryptedMessage:
             value = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as error:
             raise ValidationError("invalid JSON message") from error
-        required = {"protocol_version", "session_id", "sender_id", "message_id", "sequence_number", "nonce", "ciphertext"}
+        required = {"protocol_version", "session_id", "sender_id", "message_id", "sequence_number", "nonce", "ciphertext", "signature"}
         if not isinstance(value, dict) or set(value) != required:
             raise ValidationError("message fields do not match protocol schema")
         msg = cls(value["protocol_version"], value["session_id"], value["sender_id"], value["message_id"],
-                  value["sequence_number"], _unb64(value["nonce"], "nonce"), _unb64(value["ciphertext"], "ciphertext"))
+                  value["sequence_number"], _unb64(value["nonce"], "nonce"), _unb64(value["ciphertext"], "ciphertext"),
+                  _unb64(value["signature"], "signature"))
         msg.validate()
         return msg
 
@@ -70,13 +83,16 @@ class EncryptedMessage:
             raise ValidationError("invalid protocol metadata")
         if isinstance(self.sequence_number, bool) or not isinstance(self.sequence_number, int) or self.sequence_number < 1:
             raise ValidationError("sequence_number must be a positive integer")
-        if len(self.nonce) != 12 or len(self.ciphertext) < 16:
+        if not all(isinstance(value, bytes) for value in (self.nonce, self.ciphertext, self.signature)):
+            raise ValidationError("encrypted payload fields must be bytes")
+        if len(self.nonce) != 12 or len(self.ciphertext) < 16 or len(self.signature) != 64:
             raise ValidationError("invalid encrypted payload")
 
 
 class SenderSession:
-    def __init__(self, key: bytes, session_id: str, sender_id: str):
+    def __init__(self, key: bytes, session_id: str, sender_id: str, signing_key: Ed25519PrivateKey):
         self.key, self.session_id, self.sender_id, self._next_sequence = key, session_id, sender_id, 1
+        self.signing_key = signing_key
         self._active = True
 
     def invalidate(self) -> None:
@@ -88,16 +104,19 @@ class SenderSession:
             raise SessionInactiveError("session has been invalidated")
         if not isinstance(plaintext, str): raise TypeError("plaintext must be str")
         msg_id, seq = str(uuid4()), self._next_sequence
-        provisional = EncryptedMessage(PROTOCOL_VERSION, self.session_id, self.sender_id, msg_id, seq, b"", b"")
+        provisional = EncryptedMessage(PROTOCOL_VERSION, self.session_id, self.sender_id, msg_id, seq, b"", b"", b"")
         payload = encrypt(self.key, plaintext.encode("utf-8"), provisional.aad())
         self._next_sequence += 1
-        return EncryptedMessage(PROTOCOL_VERSION, self.session_id, self.sender_id, msg_id, seq, payload.nonce, payload.data)
+        unsigned = EncryptedMessage(PROTOCOL_VERSION, self.session_id, self.sender_id, msg_id, seq, payload.nonce, payload.data, b"")
+        return EncryptedMessage(PROTOCOL_VERSION, self.session_id, self.sender_id, msg_id, seq,
+                                payload.nonce, payload.data, self.signing_key.sign(unsigned.signing_bytes()))
 
 
 class ReceiverSession:
     """Strict in-order receiver. Production transports often need a sliding window."""
-    def __init__(self, key: bytes, session_id: str, expected_sender_id: str):
+    def __init__(self, key: bytes, session_id: str, expected_sender_id: str, signing_public_key: Ed25519PublicKey):
         self.key, self.session_id, self.expected_sender_id, self.highest_sequence = key, session_id, expected_sender_id, 0
+        self.signing_public_key = signing_public_key
         self._seen_message_ids: set[str] = set()
         self._active = True
 
@@ -109,6 +128,10 @@ class ReceiverSession:
         if not self._active:
             raise SessionInactiveError("session has been invalidated")
         message.validate()
+        try:
+            self.signing_public_key.verify(message.signature, message.signing_bytes())
+        except InvalidSignature as error:
+            raise DigitalSignatureError("message signature is invalid") from error
         if message.session_id != self.session_id or message.sender_id != self.expected_sender_id:
             raise ValidationError("message session or sender does not match")
         if message.sequence_number <= self.highest_sequence:

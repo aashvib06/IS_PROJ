@@ -17,11 +17,10 @@ def test_preliminary_security_evaluation_documents_every_required_property():
     assert by_property["Evidence tampering"].metrics["tampering_detection_rate"] == 1.0
     assert by_property["Access control"].metrics["unauthorized_rejection_rate"] == 1.0
 
-    # A shared-key MAC cannot support non-repudiation; the evaluator must not
-    # accidentally present this missing property as a passed guarantee.
-    assert by_property["Non-repudiation"].status == "LIMITATION"
-    assert by_property["Non-repudiation"].metrics["peer_forgery_accepted"] is True
-    assert report.overall_status == "PASS WITH LIMITATIONS"
+    assert by_property["Non-repudiation"].status == "PASS"
+    assert by_property["Non-repudiation"].metrics["peer_forgery_accepted"] is False
+    assert by_property["Non-repudiation"].metrics["digital_signatures_present"] is True
+    assert report.overall_status == "PASS"
 
 
 def test_evaluation_writes_interpretable_markdown_and_one_json_log_per_case(tmp_path):
@@ -38,9 +37,9 @@ def test_evaluation_writes_interpretable_markdown_and_one_json_log_per_case(tmp_
     assert all("plaintext" not in record and "session_key" not in record for record in records)
 
     text = markdown.read_text()
-    assert "PASS WITH LIMITATIONS" in text
+    assert "Overall status: **PASS**" in text
     assert "Non-repudiation" in text
-    assert "does **not** provide non-repudiation" in text
+    assert "Ed25519 signatures prevent" in text
 
 
 def test_single_cli_command_prints_a_self_contained_evaluator_report(tmp_path, capsys):
@@ -55,5 +54,5 @@ def test_single_cli_command_prints_a_self_contained_evaluator_report(tmp_path, c
     assert "METRICS" in output
     assert "MEANING" in output
     assert "FINAL SECURITY POSTURE" in output
-    assert "PASS WITH LIMITATIONS" in output
+    assert "OVERALL STATUS : PASS" in output
     assert "JSONL AUDIT LOG" in output

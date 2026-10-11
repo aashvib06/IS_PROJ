@@ -15,7 +15,7 @@ teaching, not a production chat service.
 Browser UI (renders backend JSON only)
   → DemonstrationController
   → SessionManager / SenderSession / ReceiverSession
-  → X25519 → HKDF-SHA-256 → AES-256-GCM
+  → X25519 → HKDF-SHA-256 → AES-256-GCM → Ed25519
 
 Attacker control → existing AttackSimulator
   → EvidenceLog + checkpoint → RecoveryMachine → rekey / BLOCKED
@@ -29,7 +29,8 @@ actual backend calls; JavaScript only renders them.
 
 An event contains a UTC timestamp, category, step, title, actual data, and a
 short explanation. A normal message produces creation, AAD, encryption, raw
-protocol message, receipt, validation, decryption, and acceptance events. The
+protocol message, signature creation and verification, receipt, validation,
+decryption, and acceptance events. The
 technical pane shows the exact event JSON; **Why?** toggles its explanation.
 
 The pipeline and timeline are clickable. Previous, Next step, and Play provide
@@ -39,8 +40,8 @@ a paced presentation mode.
 
 | Value | Policy |
 |---|---|
-| Public X25519 keys | Full actual value |
-| Session ID, UUID, sequence, AAD, nonce, ciphertext, GCM tag | Full actual value |
+| Public X25519 and Ed25519 keys | Full actual value |
+| Session ID, UUID, sequence, AAD, nonce, ciphertext, GCM tag, signature | Full actual value |
 | Derived AES session key | Full actual value, labelled local demonstration only |
 | Long-term identity private keys | Never displayed |
 | Raw ECDH shared secret | Not displayed |
@@ -63,7 +64,7 @@ not claim complete MITM prevention or safe first-contact key provisioning.
 
 1. Inspect session/public-key/HKDF steps.
 2. Send a normal Alice-to-Bob message and step through its trace.
-3. Inspect AAD, nonce, ciphertext/tag, and raw protocol JSON.
+3. Inspect AAD, nonce, ciphertext/tag, signature, and raw protocol JSON.
 4. Trigger replay or tampering; inspect evidence and recovery.
 5. Trigger key substitution; inspect mismatch and `BLOCKED`.
 6. Use step controls for a classroom-paced walkthrough.

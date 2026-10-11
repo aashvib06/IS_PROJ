@@ -34,18 +34,20 @@ def test_key_substitution_is_detected_against_a_pinned_public_key():
 
 def test_session_establishment_verifies_pin_and_rekey_invalidates_old_sessions():
     alice, bob, attacker = Identity.create("alice"), Identity.create("bob"), Identity.create("mallory")
-    alice_manager = SessionManager(alice, "bob", public_key_bytes(bob.public_key))
-    bob_manager = SessionManager(bob, "alice", public_key_bytes(alice.public_key))
+    alice_manager = SessionManager(alice, "bob", public_key_bytes(bob.public_key), bob.signing_public_key_bytes)
+    bob_manager = SessionManager(bob, "alice", public_key_bytes(alice.public_key), alice.signing_public_key_bytes)
     with pytest.raises(KeySubstitutionError):
-        alice_manager.establish(public_key_bytes(attacker.public_key), session_id="one", context=b"one")
-    alice_manager.establish(public_key_bytes(bob.public_key), session_id="one", context=b"one")
-    bob_manager.establish(public_key_bytes(alice.public_key), session_id="one", context=b"one")
+        alice_manager.establish(public_key_bytes(attacker.public_key), attacker.signing_public_key_bytes, session_id="one", context=b"one")
+    with pytest.raises(KeySubstitutionError):
+        alice_manager.establish(public_key_bytes(bob.public_key), attacker.signing_public_key_bytes, session_id="one", context=b"one")
+    alice_manager.establish(public_key_bytes(bob.public_key), bob.signing_public_key_bytes, session_id="one", context=b"one")
+    bob_manager.establish(public_key_bytes(alice.public_key), alice.signing_public_key_bytes, session_id="one", context=b"one")
     old_sender, old_receiver = alice_manager.sender, bob_manager.receiver
     assert old_sender is not None and old_receiver is not None
     old_message = old_sender.encrypt("before rekey")
     assert old_receiver.decrypt(old_message) == "before rekey"
-    alice_manager.rekey(public_key_bytes(bob.public_key), session_id="two", context=b"two")
-    bob_manager.rekey(public_key_bytes(alice.public_key), session_id="two", context=b"two")
+    alice_manager.rekey(public_key_bytes(bob.public_key), bob.signing_public_key_bytes, session_id="two", context=b"two")
+    bob_manager.rekey(public_key_bytes(alice.public_key), alice.signing_public_key_bytes, session_id="two", context=b"two")
     with pytest.raises(SessionInactiveError): old_sender.encrypt("must fail")
     with pytest.raises(SessionInactiveError): old_receiver.decrypt(old_message)
     assert alice_manager.sender is not None and bob_manager.receiver is not None

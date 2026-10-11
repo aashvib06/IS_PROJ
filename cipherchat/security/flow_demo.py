@@ -84,10 +84,12 @@ class FlowDemonstration:
         self.alice = Identity.create("alice")
         self.bob = Identity.create("bob")
         self.alice_sessions = SessionManager(
-            self.alice, self.bob.identity_id, public_key_bytes(self.bob.public_key)
+            self.alice, self.bob.identity_id, public_key_bytes(self.bob.public_key),
+            self.bob.signing_public_key_bytes,
         )
         self.bob_sessions = SessionManager(
-            self.bob, self.alice.identity_id, public_key_bytes(self.alice.public_key)
+            self.bob, self.alice.identity_id, public_key_bytes(self.alice.public_key),
+            self.alice.signing_public_key_bytes,
         )
         self.evidence = EvidenceLog()
         self.recovery = RecoveryMachine()
@@ -104,11 +106,13 @@ class FlowDemonstration:
         self.context = f"cipherchat-flow:{reason}:generation-{self.session_generation}".encode()
         self.alice_sessions.establish(
             public_key_bytes(self.bob.public_key),
+            self.bob.signing_public_key_bytes,
             session_id=self.session_id,
             context=self.context,
         )
         self.bob_sessions.establish(
             public_key_bytes(self.alice.public_key),
+            self.alice.signing_public_key_bytes,
             session_id=self.session_id,
             context=self.context,
         )
@@ -121,13 +125,15 @@ class FlowDemonstration:
         _status("Bob identity", self.bob.identity_id)
         print("Private keys remain inside their Identity objects and are never displayed.")
 
-        _step(2, "Exchange public X25519 material")
+        _step(2, "Exchange public X25519 and Ed25519 material")
         alice_public = public_key_bytes(self.alice.public_key)
         bob_public = public_key_bytes(self.bob.public_key)
         _status("Alice public key bytes", str(len(alice_public)))
         _status("Alice fingerprint", _fingerprint(alice_public))
         _status("Bob public key bytes", str(len(bob_public)))
         _status("Bob fingerprint", _fingerprint(bob_public))
+        _status("Alice signing fingerprint", _fingerprint(self.alice.signing_public_key_bytes))
+        _status("Bob signing fingerprint", _fingerprint(self.bob.signing_public_key_bytes))
 
         _step(3, "Verify pinned peer keys before key agreement")
         _status("Alice expects", "Bob's pinned public-key fingerprint")
@@ -192,22 +198,21 @@ class FlowDemonstration:
         _status("Authentication tag", "16 bytes, appended to ciphertext")
         print("A fresh random nonce was generated. The session key remains hidden.")
 
-        _step(5, "Serialize the encrypted wire envelope")
+        _step(5, "Sign and serialize the encrypted wire envelope")
         wire_dict = message.to_dict()
         wire_json = message.to_json()
         envelope_hash = _sha256(wire_json.encode("utf-8"))
         print(_pretty_json(wire_dict))
         _status("Canonical envelope bytes", str(len(wire_json.encode("utf-8"))))
         _status("Envelope SHA-256", envelope_hash)
-        print(
-            "This envelope hash is a reproducible observation fingerprint. It is not a "
-            "digital signature and does not itself prove authorship."
-        )
+        _status("Digital signature", message.signature.hex())
+        print("The envelope hash is an observation fingerprint; the Ed25519 signature proves possession of Alice's signing key.")
 
         _step(6, "Bob validates and decrypts")
         _status("Schema validation", "PASS")
         _status("Expected session", "PASS")
         _status("Expected sender", "PASS")
+        _status("Ed25519 signature", "PASS")
         _status("Replay checks", "PASS - new sequence and message ID")
         recovered = receiver.decrypt(message)
         _status("AES-GCM authentication", "PASS")
@@ -347,6 +352,7 @@ class FlowDemonstration:
         try:
             self.alice_sessions.establish(
                 mallory_public,
+                mallory.signing_public_key_bytes,
                 session_id=f"substitution-{uuid4()}",
                 context=b"untrusted-substitution",
             )

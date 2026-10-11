@@ -78,12 +78,12 @@ class AttackSimulator:
 
     def _scenario(self, label: str) -> _Scenario:
         alice, bob = Identity.create("alice"), Identity.create("bob")
-        alice_sessions = SessionManager(alice, bob.identity_id, public_key_bytes(bob.public_key))
-        bob_sessions = SessionManager(bob, alice.identity_id, public_key_bytes(alice.public_key))
+        alice_sessions = SessionManager(alice, bob.identity_id, public_key_bytes(bob.public_key), bob.signing_public_key_bytes)
+        bob_sessions = SessionManager(bob, alice.identity_id, public_key_bytes(alice.public_key), alice.signing_public_key_bytes)
         session_id = f"simulation-{label}"
         context = f"cipherchat-simulation:{label}".encode()
-        alice_sessions.establish(public_key_bytes(bob.public_key), session_id=session_id, context=context)
-        bob_sessions.establish(public_key_bytes(alice.public_key), session_id=session_id, context=context)
+        alice_sessions.establish(public_key_bytes(bob.public_key), bob.signing_public_key_bytes, session_id=session_id, context=context)
+        bob_sessions.establish(public_key_bytes(alice.public_key), alice.signing_public_key_bytes, session_id=session_id, context=context)
         return _Scenario(alice, bob, alice_sessions, bob_sessions, EvidenceLog(), RecoveryMachine(), session_id)
 
     @staticmethod
@@ -131,8 +131,8 @@ class AttackSimulator:
         scenario.recovery.verification_succeeded()
         new_session_id = f"{scenario.session_id}-rekey"
         context = f"cipherchat-simulation:rekey:{label}".encode()
-        scenario.alice_sessions.rekey(public_key_bytes(scenario.bob.public_key), session_id=new_session_id, context=context)
-        scenario.bob_sessions.rekey(public_key_bytes(scenario.alice.public_key), session_id=new_session_id, context=context)
+        scenario.alice_sessions.rekey(public_key_bytes(scenario.bob.public_key), scenario.bob.signing_public_key_bytes, session_id=new_session_id, context=context)
+        scenario.bob_sessions.rekey(public_key_bytes(scenario.alice.public_key), scenario.alice.signing_public_key_bytes, session_id=new_session_id, context=context)
         scenario.recovery.rekey_complete()
         try:
             old_sender.encrypt("must not send")
@@ -193,7 +193,7 @@ class AttackSimulator:
         scenario = self._scenario("key-substitution")
         mallory = Identity.create("mallory")
         try:
-            scenario.alice_sessions.establish(public_key_bytes(mallory.public_key), session_id="substituted", context=b"substituted")
+            scenario.alice_sessions.establish(public_key_bytes(mallory.public_key), mallory.signing_public_key_bytes, session_id="substituted", context=b"substituted")
         except Exception as error:
             classification = classify_failure(error)
             evidence_hash, checkpoint_valid = self._record(scenario, classification, error, None)

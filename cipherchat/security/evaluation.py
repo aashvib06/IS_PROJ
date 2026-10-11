@@ -74,11 +74,11 @@ def _timed(case: Callable[[], CaseResult]) -> CaseResult:
 
 def _sessions(label: str) -> tuple[SessionManager, SessionManager]:
     alice, bob = Identity.create("alice"), Identity.create("bob")
-    alice_manager = SessionManager(alice, "bob", public_key_bytes(bob.public_key))
-    bob_manager = SessionManager(bob, "alice", public_key_bytes(alice.public_key))
+    alice_manager = SessionManager(alice, "bob", public_key_bytes(bob.public_key), bob.signing_public_key_bytes)
+    bob_manager = SessionManager(bob, "alice", public_key_bytes(alice.public_key), alice.signing_public_key_bytes)
     context = f"security-evaluation:{label}".encode()
-    alice_manager.establish(public_key_bytes(bob.public_key), session_id=label, context=context)
-    bob_manager.establish(public_key_bytes(alice.public_key), session_id=label, context=context)
+    alice_manager.establish(public_key_bytes(bob.public_key), bob.signing_public_key_bytes, session_id=label, context=context)
+    bob_manager.establish(public_key_bytes(alice.public_key), alice.signing_public_key_bytes, session_id=label, context=context)
     return alice_manager, bob_manager
 
 
@@ -90,7 +90,7 @@ def _confidentiality(sample_size: int) -> CaseResult:
     authorized_round_trips = 0
     serialized_leaks = 0
     for index, message in enumerate(messages):
-        attacker = ReceiverSession(b"M" * 32, message.session_id, message.sender_id)
+        attacker = ReceiverSession(b"M" * 32, message.session_id, message.sender_id, alice.identity.signing_public_key)
         try:
             attacker.decrypt(message)
         except Exception:
@@ -135,7 +135,7 @@ def _authenticity() -> CaseResult:
     )
     rejected = 0
     for probe in probes:
-        receiver = ReceiverSession(bob.receiver.key, "authenticity", "alice")
+        receiver = ReceiverSession(bob.receiver.key, "authenticity", "alice", alice.identity.signing_public_key)
         try:
             receiver.decrypt(probe)
         except Exception:
@@ -143,7 +143,7 @@ def _authenticity() -> CaseResult:
     mallory = Identity.create("mallory")
     pin_rejected = False
     try:
-        alice.establish(public_key_bytes(mallory.public_key), session_id="forged", context=b"forged")
+        alice.establish(public_key_bytes(mallory.public_key), mallory.signing_public_key_bytes, session_id="forged", context=b"forged")
     except KeySubstitutionError:
         pin_rejected = True
     passed = rejected == len(probes) and pin_rejected
@@ -176,7 +176,7 @@ def _integrity() -> CaseResult:
     }
     rejected = 0
     for tampered in variants.values():
-        receiver = ReceiverSession(bob.receiver.key, "integrity", "alice")
+        receiver = ReceiverSession(bob.receiver.key, "integrity", "alice", alice.identity.signing_public_key)
         try:
             receiver.decrypt(tampered)
         except Exception:
@@ -196,18 +196,23 @@ def _integrity() -> CaseResult:
 def _non_repudiation() -> CaseResult:
     alice, bob = _sessions("non-repudiation")
     assert alice.sender is not None and bob.receiver is not None
-    # Both peers derive the same symmetric key. A peer can therefore construct
-    # a valid message labelled as the other peer; no digital signature exists.
-    peer_forge = SenderSession(bob.receiver.key, "non-repudiation", "alice")
+    # Bob knows the shared encryption key, but not Alice's Ed25519 private key.
+    # A message signed with Bob's key while claiming to be Alice must fail.
+    peer_forge = SenderSession(bob.receiver.key, "non-repudiation", "alice", bob.identity.signing_private_key)
     forged = peer_forge.encrypt("peer-generated message")
-    forgery_accepted = bob.receiver.decrypt(forged) == "peer-generated message"
+    forgery_accepted = False
+    try:
+        bob.receiver.decrypt(forged)
+        forgery_accepted = True
+    except Exception:
+        pass
     return CaseResult(
-        "NREP-01", "Non-repudiation", "LIMITATION" if forgery_accepted else "PASS",
+        "NREP-01", "Non-repudiation", "FAIL" if forgery_accepted else "PASS",
         "Determine whether a recipient can create a message that verifies as if it came from the sender.",
-        "A system claiming non-repudiation must bind messages to the sender with a sender-only signing key.",
+        "A message lacking a valid signature from the sender-only Ed25519 key is rejected.",
         f"A peer holding the shared session key created a message accepted as Alice: {forgery_accepted}.",
-        {"peer_forgery_accepted": forgery_accepted, "digital_signatures_present": False},
-        "CipherChat provides symmetric message authentication, not non-repudiation. Digital signatures plus protected identity-key provenance would be required.",
+        {"peer_forgery_accepted": forgery_accepted, "digital_signatures_present": True},
+        "Ed25519 signatures bind the complete encrypted envelope to Alice's private signing key. This depends on protected private keys and trusted public-key provisioning.",
         0.0,
     )
 
@@ -252,17 +257,17 @@ def _access_control() -> CaseResult:
     message = alice.sender.encrypt("access probe")
     denied = 0
     for receiver in (
-        ReceiverSession(bob.receiver.key, "other-session", "alice"),
-        ReceiverSession(bob.receiver.key, "access-control", "mallory"),
-        ReceiverSession(b"Z" * 32, "access-control", "alice"),
+        ReceiverSession(bob.receiver.key, "other-session", "alice", alice.identity.signing_public_key),
+        ReceiverSession(bob.receiver.key, "access-control", "mallory", alice.identity.signing_public_key),
+        ReceiverSession(b"Z" * 32, "access-control", "alice", alice.identity.signing_public_key),
     ):
         try:
             receiver.decrypt(message)
         except Exception:
             denied += 1
     old_sender, old_receiver = alice.sender, bob.receiver
-    alice.rekey(public_key_bytes(bob.identity.public_key), session_id="access-control-2", context=b"access-control-2")
-    bob.rekey(public_key_bytes(alice.identity.public_key), session_id="access-control-2", context=b"access-control-2")
+    alice.rekey(public_key_bytes(bob.identity.public_key), bob.identity.signing_public_key_bytes, session_id="access-control-2", context=b"access-control-2")
+    bob.rekey(public_key_bytes(alice.identity.public_key), alice.identity.signing_public_key_bytes, session_id="access-control-2", context=b"access-control-2")
     invalidated = 0
     try:
         old_sender.encrypt("should be denied")
@@ -378,9 +383,9 @@ def print_terminal_report(report: EvaluationReport, markdown_path: Path, jsonl_p
         f"{counts['LIMITATION']} LIMITATION"
     )
     print(
-        "CONCLUSION     : Tested encryption and protocol controls passed, but the\n"
-        "                 system does not provide non-repudiation because peers\n"
-        "                 share the symmetric authentication key."
+        "CONCLUSION     : Tested encryption, Ed25519 signatures, evidence, and\n"
+        "                 protocol controls passed. Trust still depends on secure\n"
+        "                 private keys and public-key provisioning."
     )
     print(f"READABLE REPORT: {markdown_path}")
     print(f"JSONL AUDIT LOG: {jsonl_path}")
@@ -406,7 +411,7 @@ def write_markdown(report: EvaluationReport, path: Path, jsonl_name: str) -> Non
     )
     content = f"""# CipherChat Preliminary Security Test Report
 
-Generated: `{report.generated_at}`  
+Generated: `{report.generated_at}`
 Overall status: **{report.overall_status}**
 
 ## Scope and Method
@@ -435,11 +440,11 @@ Totals: **{counts['PASS']} PASS**, **{counts['FAIL']} FAIL**, and
 
 ## Conclusion
 
-CipherChat passed the sampled confidentiality, in-session authenticity,
-integrity, evidence-tamper detection, and protocol-binding/access tests. It
-does **not** provide non-repudiation: either participant can create valid
-AES-GCM messages because authentication uses a shared symmetric key. Peer-key
-pinning also depends on trusted out-of-band provisioning, evidence checkpoints
+CipherChat passed the sampled confidentiality, authenticity, integrity,
+digital-signature/non-repudiation, evidence-tamper detection, and
+protocol-binding/access tests. Ed25519 signatures prevent a peer that knows
+only the shared AES key from forging another identity's messages. Peer-key
+pinning still depends on trusted out-of-band provisioning, evidence checkpoints
 must be stored separately, and application-level authorization is outside the
 prototype.
 

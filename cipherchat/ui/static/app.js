@@ -65,7 +65,9 @@ function renderConversation() {
       ['message', last.message_id],
       ['sequence', last.sequence_number],
       ['aad hash', last.aad_sha256],
-      ['envelope hash', last.envelope_sha256]
+      ['envelope hash', last.envelope_sha256],
+      ['signature', short(last.signature, 28)],
+      ['signature verified', last.signature_verified ? 'yes // Ed25519' : 'no']
     ]);
   }
 }

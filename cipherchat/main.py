@@ -28,10 +28,10 @@ def print_encrypted_message(label: str, message) -> None:
 def setup_sessions() -> tuple[SessionManager, SessionManager, str, Identity, Identity]:
     alice, bob = Identity.create("alice"), Identity.create("bob")
     context, session_id = b"demo-session", str(uuid4())
-    alice_sessions = SessionManager(alice, bob.identity_id, public_key_bytes(bob.public_key))
-    bob_sessions = SessionManager(bob, alice.identity_id, public_key_bytes(alice.public_key))
-    alice_sessions.establish(public_key_bytes(bob.public_key), session_id=session_id, context=context)
-    bob_sessions.establish(public_key_bytes(alice.public_key), session_id=session_id, context=context)
+    alice_sessions = SessionManager(alice, bob.identity_id, public_key_bytes(bob.public_key), bob.signing_public_key_bytes)
+    bob_sessions = SessionManager(bob, alice.identity_id, public_key_bytes(alice.public_key), alice.signing_public_key_bytes)
+    alice_sessions.establish(public_key_bytes(bob.public_key), bob.signing_public_key_bytes, session_id=session_id, context=context)
+    bob_sessions.establish(public_key_bytes(alice.public_key), alice.signing_public_key_bytes, session_id=session_id, context=context)
     return alice_sessions, bob_sessions, session_id, alice, bob
 
 
@@ -74,8 +74,8 @@ def handle_attack(label: str, alice_sessions: SessionManager, bob_sessions: Sess
             print(f"Previous evidence hash: {record.previous_evidence_hash}")
             recovery.report_violation(); recovery.begin_verification(); recovery.verification_succeeded()
             rekey_session_id, rekey_context = str(uuid4()), b"rekey-replay-" + uuid4().bytes
-            alice_sessions.rekey(public_key_bytes(bob_sessions.identity.public_key), session_id=rekey_session_id, context=rekey_context)
-            bob_sessions.rekey(public_key_bytes(alice_sessions.identity.public_key), session_id=rekey_session_id, context=rekey_context)
+            alice_sessions.rekey(public_key_bytes(bob_sessions.identity.public_key), bob_sessions.identity.signing_public_key_bytes, session_id=rekey_session_id, context=rekey_context)
+            bob_sessions.rekey(public_key_bytes(alice_sessions.identity.public_key), alice_sessions.identity.signing_public_key_bytes, session_id=rekey_session_id, context=rekey_context)
             recovery.rekey_complete()
             print_recovery_summary(recovery)
         return
@@ -113,8 +113,8 @@ def handle_attack(label: str, alice_sessions: SessionManager, bob_sessions: Sess
             print(f"Previous evidence hash: {record.previous_evidence_hash}")
             recovery.report_violation(); recovery.begin_verification(); recovery.verification_succeeded()
             rekey_session_id, rekey_context = str(uuid4()), b"rekey-tamper-" + uuid4().bytes
-            alice_sessions.rekey(public_key_bytes(bob_sessions.identity.public_key), session_id=rekey_session_id, context=rekey_context)
-            bob_sessions.rekey(public_key_bytes(alice_sessions.identity.public_key), session_id=rekey_session_id, context=rekey_context)
+            alice_sessions.rekey(public_key_bytes(bob_sessions.identity.public_key), bob_sessions.identity.signing_public_key_bytes, session_id=rekey_session_id, context=rekey_context)
+            bob_sessions.rekey(public_key_bytes(alice_sessions.identity.public_key), alice_sessions.identity.signing_public_key_bytes, session_id=rekey_session_id, context=rekey_context)
             recovery.rekey_complete()
             print_recovery_summary(recovery)
         return
@@ -123,7 +123,7 @@ def handle_attack(label: str, alice_sessions: SessionManager, bob_sessions: Sess
         print("Attempting to establish a session with Mallory's public key...")
         mallory = Identity.create("mallory")
         try:
-            alice_sessions.establish(public_key_bytes(mallory.public_key), session_id="substituted", context=b"substituted")
+            alice_sessions.establish(public_key_bytes(mallory.public_key), mallory.signing_public_key_bytes, session_id="substituted", context=b"substituted")
         except Exception as error:
             attack = classify_failure(error)
             record = evidence.record(

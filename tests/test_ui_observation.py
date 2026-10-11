@@ -43,6 +43,9 @@ def test_ui_snapshot_exposes_delivery_hashes_and_verified_evidence_chain():
     assert delivery["plaintext"] == "four-screen verification"
     assert len(delivery["aad_sha256"]) == 64
     assert len(delivery["envelope_sha256"]) == 64
+    assert delivery["signature_verified"] is True
+    assert len(base64.b64decode(delivery["signature"])) == 64
+    assert any(event["title"] == "ED25519 SIGNATURE VERIFIED" for event in delivered["events"])
 
     attacked = controller.attack("tamper_ciphertext")
     assert attacked["evidence"]["chain_valid"] is True

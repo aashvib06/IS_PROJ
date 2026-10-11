@@ -1,6 +1,6 @@
 from enum import Enum
 from cipherchat.crypto.encryption import AuthenticationError
-from cipherchat.protocol.messages import ReplayError, ValidationError
+from cipherchat.protocol.messages import DigitalSignatureError, ReplayError, ValidationError
 
 class AttackType(str, Enum):
     REPLAY = "REPLAY"
@@ -11,6 +11,7 @@ class AttackType(str, Enum):
 
 def classify_failure(error: Exception) -> AttackType:
     if isinstance(error, ReplayError): return AttackType.REPLAY
+    if isinstance(error, DigitalSignatureError): return AttackType.TAMPERING
     if isinstance(error, AuthenticationError): return AttackType.TAMPERING
     if isinstance(error, ValidationError): return AttackType.INVALID_AUTHENTICATION
     if isinstance(error, KeySubstitutionError): return AttackType.KEY_SUBSTITUTION

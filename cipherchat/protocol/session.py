@@ -6,6 +6,7 @@ from cipherchat.crypto.identity import Identity
 from cipherchat.crypto.kdf import derive_session_key
 from cipherchat.crypto.key_exchange import derive_shared_secret, load_public_key, public_key_bytes
 from cipherchat.security.attacks import verify_expected_public_key
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from .messages import ReceiverSession, SenderSession
 
 
@@ -19,31 +20,39 @@ class SessionInfo:
 class SessionManager:
     """Owns the active directional sessions for one peer relationship.
 
-    The caller supplies a previously verified/pinned peer public key. Every
-    establishment verifies the presented key before X25519 is performed.
-    Rekeying invalidates existing session objects before installing a new pair.
+    The caller supplies previously verified/pinned peer X25519 and Ed25519
+    public keys. Every establishment verifies the presented exchange key before
+    X25519 is performed. Rekeying invalidates existing session objects before
+    installing a new pair.
     """
-    def __init__(self, identity: Identity, peer_id: str, expected_peer_public_key: bytes):
+    def __init__(self, identity: Identity, peer_id: str, expected_peer_public_key: bytes,
+                 expected_peer_signing_public_key: bytes):
         self.identity = identity
         self.peer_id = peer_id
         self.expected_peer_public_key = expected_peer_public_key
+        self.expected_peer_signing_public_key = expected_peer_signing_public_key
         self.sender: SenderSession | None = None
         self.receiver: ReceiverSession | None = None
         self.info: SessionInfo | None = None
 
-    def establish(self, presented_peer_public_key: bytes, *, session_id: str, context: bytes) -> SessionInfo:
+    def establish(self, presented_peer_public_key: bytes, presented_peer_signing_public_key: bytes,
+                  *, session_id: str, context: bytes) -> SessionInfo:
         verify_expected_public_key(self.expected_peer_public_key, presented_peer_public_key)
+        verify_expected_public_key(self.expected_peer_signing_public_key, presented_peer_signing_public_key)
         peer_public_key = load_public_key(presented_peer_public_key)
         key = derive_session_key(derive_shared_secret(self.identity.private_key, peer_public_key), context=context)
         self.invalidate()
-        self.sender = SenderSession(key, session_id, self.identity.identity_id)
-        self.receiver = ReceiverSession(key, session_id, self.peer_id)
+        peer_signing_key = Ed25519PublicKey.from_public_bytes(presented_peer_signing_public_key)
+        self.sender = SenderSession(key, session_id, self.identity.identity_id, self.identity.signing_private_key)
+        self.receiver = ReceiverSession(key, session_id, self.peer_id, peer_signing_key)
         self.info = SessionInfo(session_id=session_id, context=context)
         return self.info
 
-    def rekey(self, presented_peer_public_key: bytes, *, context: bytes, session_id: str | None = None) -> SessionInfo:
+    def rekey(self, presented_peer_public_key: bytes, presented_peer_signing_public_key: bytes,
+              *, context: bytes, session_id: str | None = None) -> SessionInfo:
         """Replace active sessions using a fresh session ID and HKDF context."""
-        return self.establish(presented_peer_public_key, session_id=session_id or str(uuid4()), context=context)
+        return self.establish(presented_peer_public_key, presented_peer_signing_public_key,
+                              session_id=session_id or str(uuid4()), context=context)
 
     def invalidate(self) -> None:
         if self.sender is not None:
