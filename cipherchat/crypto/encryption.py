@@ -26,7 +26,7 @@ def encrypt(key: bytes, plaintext: bytes, associated_data: bytes) -> Ciphertext:
     _validate_key(key)
     if not isinstance(plaintext, bytes) or not isinstance(associated_data, bytes):
         raise TypeError("plaintext and associated_data must be bytes")
-    nonce = os.urandom(NONCE_BYTES)  # fresh CSPRNG nonce for every operation
+    nonce = os.urandom(NONCE_BYTES)  # fresh nonce for every operation
     return Ciphertext(nonce=nonce, data=AESGCM(key).encrypt(nonce, plaintext, associated_data))
 
 
